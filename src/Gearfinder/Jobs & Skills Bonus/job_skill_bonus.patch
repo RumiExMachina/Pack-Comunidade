@@ -1,0 +1,544 @@
+From 0bacb231e6f42576cccf00870e1f2b9e873f3e81 Mon Sep 17 00:00:00 2001
+From: "Luis A. H. Larrosa" <luis.hlarrosa@gmail.com>
+Date: Thu, 2 Oct 2025 06:21:14 -0300
+Subject: [PATCH] Implemented Job + Skill Bonus Script
+
+---
+ db/job_bonus.yml       |  91 ++++++++++++++
+ db/job_bonus_skill.yml |  23 ++++
+ src/map/pc.cpp         | 265 +++++++++++++++++++++++++++++++++++++++++
+ src/map/pc.hpp         |  59 +++++++++
+ src/map/status.cpp     |   2 +
+ 5 files changed, 440 insertions(+)
+ create mode 100644 db/job_bonus.yml
+ create mode 100644 db/job_bonus_skill.yml
+
+diff --git a/db/job_bonus.yml b/db/job_bonus.yml
+new file mode 100644
+index 0000000000..327681550d
+--- /dev/null
++++ b/db/job_bonus.yml
+@@ -0,0 +1,91 @@
++###########################################################################
++# Job bonus Database
++###########################################################################
++#
++# Job bonus Settings
++#
++###########################################################################
++# - Job : Use constant JOB_* from src/map/script_constants.hpp
++#   Script : Script like used for items
++#
++#   OR
++#
++# - Char : Put a char ID to give him specials bonus
++#   Script : Script like used for items
++#
++#   OR
++#
++# - Account : Put an account ID to give to all his chars specials bonus
++#   Script : Script like used for items
++#
++#   OR
++#
++# - Guild : Put a guild ID to give to all his chars specials bonus
++#   Script : Script like used for items
++###########################################################################
++
++Header:
++  Type: JOB_BONUS
++  Version: 1
++
++Body:
++#   For all jobs
++  - Id: 0
++    Job: All
++    Script: |
++      bonus bSpeedRate,35;
++      bonus bStr,100;
++#   For choosen jobs
++  - Id: 1
++    Job: JOB_NOVICE
++    Script: |
++      bonus bAllStats,10;
++  - Id: 2
++    Job: JOB_SWORDMAN
++    Script: |
++      bonus bBaseAtk,20;
++      bonus bMaxSP,100;
++  - Id: 3
++    Job: JOB_MAGE
++    Script: |
++      bonus bMatk,50;
++      bonus bMaxHP,300;
++  - Id: 4
++    Job: JOB_ARCHER
++    Script: |
++      bonus bDex,10;
++      bonus bMaxSP,200;
++  - Id: 5
++    Job: JOB_ACOLYTE
++    Script: |
++      bonus bInt,10;
++      bonus bVariableCastrate,-20;
++      bonus bDef,10;
++  - Id: 6
++    Job: JOB_MERCHANT
++    Script: |
++      bonus bDoubleRate,50;
++      bonus bAgi,10;
++  - Id: 7
++    Job: JOB_THIEF
++    Script: |
++      bonus bDex,5;
++      bonus bAgi,5;
++# Give bonus only to chosen char
++  - Id: 8
++    Char: 150000
++    Script: |
++      bonus2 bExpAddRace,RC_ALL,5;
++      bonus bMdef,50;
++# Give bonus only to chosen account
++  - Id: 9
++    Account: 2000001
++    Script: |
++      bonus2 bSkillAtk,"CR_SHIELDBOOMERANG",60;
++      bonus bMaxHP,5000;
++# Give bonus only to chosen guild
++  - Id: 10
++    Guild: 1
++    Script: |
++      bonus2 bSkillAtk,"CR_SHIELDBOOMERANG",60;
++      bonus bMaxHP,5000;
+\ No newline at end of file
+diff --git a/db/job_bonus_skill.yml b/db/job_bonus_skill.yml
+new file mode 100644
+index 0000000000..9e2adf2dff
+--- /dev/null
++++ b/db/job_bonus_skill.yml
+@@ -0,0 +1,23 @@
++###########################################################################  
++# Job Skill Bonus Database  
++###########################################################################  
++#  
++# Job Skill Bonus Settings  
++#  
++###########################################################################  
++# - Id: Unique entry ID  
++#   SkillId: Skill constant from src/map/script_constants.hpp  
++#   MinLevel: Minimum skill level required  
++#   Script: Script bonuses to apply  
++###########################################################################  
++  
++Header:  
++  Type: JOB_BONUS_SKILL  
++  Version: 1  
++  
++Body:  
++  - Id: 1  
++    SkillId: 42 # MC_MAMMONITE
++    MinLevel: 1  
++    Script: |  
++      bonus bStr,1;
+\ No newline at end of file
+diff --git a/src/map/pc.cpp b/src/map/pc.cpp
+index 2210ddbf4a..6c5754f1ee 100755
+--- a/src/map/pc.cpp
++++ b/src/map/pc.cpp
+@@ -67,6 +67,8 @@
+ using namespace rathena;
+ 
+ JobDatabase job_db;
++JobBonusDatabase job_bonus_db;  
++JobBonusSkillDatabase job_bonus_skill_db;
+ 
+ CaptchaDatabase captcha_db;
+ const char *macro_allowed_answer_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890";
+@@ -13286,6 +13288,262 @@ void pc_delspiritcharm(map_session_data *sd, int32 count, int32 type)
+ 	clif_spiritcharm( *sd );
+ }
+ 
++/**
++ * Pc status refresh (in case of db reload)
++ * @param sd Player
++ * @author [Gearlock]
++ **/
++int pc_status_refresh(map_session_data *sd, va_list ap) {
++	status_calc_pc(sd, SCO_FORCE);
++
++	return 1;
++}
++
++/**
++ * Check & run script bonus for a player
++ * @param sd Player
++ * @author [Gearlock]
++ **/
++void pc_job_bonus(map_session_data *sd) {
++	int idx = 0, i = 0;
++	std::shared_ptr<s_job_bonus_db> js;
++
++	nullpo_retv(sd);
++	while ( (js = job_bonus_db.find(i)) != nullptr ) {
++		if(	js->type == JST_ALL
++			|| (js->type == JST_ACCOUNT && sd->status.account_id == js->account_id)
++			|| (js->type == JST_CHAR && sd->status.char_id == js->char_id)
++			|| (js->type == JST_GUILD && sd->status.guild_id && sd->status.guild_id == js->guild_id)
++			|| (js->type == JST_JOB && sd->status.class_ == js->jobidx))
++			run_script(js->script, 0, sd->id, 0);
++		i++;
++	}
++}
++
++/**
++ * Get location of job bonus database
++ * @author [Gearlock]
++ **/
++const std::string JobBonusDatabase::getDefaultLocation() {
++	return std::string(db_path) + "/job_bonus.yml";
++}
++
++/**
++ * Read job bonus YML db
++ * @author [Gearlock]
++ **/
++uint64 JobBonusDatabase::parseBodyNode( const ryml::NodeRef &node ){
++	uint32 id;
++
++	if (!this->asUInt32(node, "Id", id))
++		return 0;
++
++	std::shared_ptr<s_job_bonus_db> js = this->find(id);
++	bool exists = js != nullptr;
++
++   if (!exists) {
++       if ((!this->nodeExists(node, "Job")
++           && !this->nodeExists(node, "Account")
++           && !this->nodeExists(node, "Char")
++           && !this->nodeExists(node, "Guild")
++           && !this->nodesExist(node, { "Script" } ))) {
++           return 0;
++       }
++
++		js = std::make_shared<s_job_bonus_db>();
++		js->id = id;
++	}
++
++	if (this->nodeExists(node, "Job")){
++		std::string job;
++
++		if (!this->asString(node, "Job", job))
++			return 0;
++
++		if(strcmp(job.c_str(), "All") == 0){
++			js->type = JST_ALL;
++		} else {
++			js->type = JST_JOB;
++			int64 jobid = 0;
++			if (pcdb_checkid(jobid) && script_get_constant(job.c_str(),&jobid)) {
++				js->jobidx = static_cast<uint32>(jobid);
++			}
++			else {
++				this->invalidWarning(node["Job"], "Unknown job %s.\n", job.c_str());
++				return 0;
++			}
++		}
++	}
++
++	if (this->nodeExists(node, "Account")){
++		uint32 account_id;
++
++		if (!this->asUInt32(node, "Account", account_id))
++			return 0;
++
++		js->account_id = account_id;
++		js->type = JST_ACCOUNT;
++	}
++
++	if (this->nodeExists(node, "Char")){
++		uint32 char_id;
++
++		if (!this->asUInt32(node, "Char", char_id))
++			return 0;
++
++		js->char_id = char_id;
++		js->type = JST_CHAR;
++	}
++
++	if (this->nodeExists(node, "Guild")){
++		uint32 guild_id;
++
++		if (!this->asUInt32(node, "Guild", guild_id))
++			return 0;
++
++		js->guild_id = guild_id;
++		js->type = JST_GUILD;
++	}
++
++	std::string script;
++	if (this->nodeExists(node, "Script")) {
++		if (!this->asString(node, "Script", script))
++			return 0;
++
++		if (exists && js->script) {
++			script_free_code(js->script);
++			js->script = nullptr;
++		}
++
++		js->script = parse_script(script.c_str(), this->getCurrentFile().c_str(), this->getLineNumber(node["Script"]), SCRIPT_IGNORE_EXTERNAL_BRACKETS);
++	} else {
++		if (!exists)
++			js->script = nullptr;
++	}
++
++	if (!exists)
++		this->put(id,js);
++
++	return 1;
++}
++
++/**  
++ * Check & run skill-based script bonus for a player  
++ * @param sd Player  
++ * @author [Gearlock]  
++ **/  
++void pc_job_bonus_skill(map_session_data *sd) {  
++    nullpo_retv(sd);  
++      
++    // Iterate through all entries in the database  
++    for (const auto& entry : job_bonus_skill_db) {  
++        std::shared_ptr<s_job_bonus_skill_db> js = entry.second;  
++          
++        // Check if player has the required skill at minimum level  
++        int skill_level = pc_checkskill(sd, js->skill_id);  
++        if (skill_level >= js->min_level) {  
++            run_script(js->script, 0, sd->id, 0);  
++        }  
++    }  
++}
++
++/**  
++ * Get location of job bonus skill database  
++ **/  
++const std::string JobBonusSkillDatabase::getDefaultLocation() {  
++    return std::string(db_path) + "/job_bonus_skill.yml";  
++}  
++  
++/**  
++ * Read job bonus skill YML db  
++ **/  
++uint64 JobBonusSkillDatabase::parseBodyNode(const ryml::NodeRef &node) {  
++    uint32 id;  
++  
++    if (!this->asUInt32(node, "Id", id))  
++        return 0;  
++  
++    std::shared_ptr<s_job_bonus_skill_db> js = this->find(id);  
++    bool exists = js != nullptr;  
++  
++    if (!exists) {  
++        if (!this->nodesExist(node, {"SkillId", "MinLevel", "Script"})) {  
++            return 0;  
++        }  
++  
++        js = std::make_shared<s_job_bonus_skill_db>();  
++        js->id = id;  
++    }  
++  
++    // Parse skill ID  
++	if (this->nodeExists(node, "SkillId")) {  
++	    std::string skill_input;  
++	    if (!this->asString(node, "SkillId", skill_input))  
++	        return 0;  
++	
++	    uint32 skill_id = 0;  
++	
++	    // Check if it's a numeric ID  
++	    if (std::all_of(skill_input.begin(), skill_input.end(), ::isdigit)) {  
++	        skill_id = static_cast<uint32>(std::stoul(skill_input));  
++	    } else {  
++	        // Try to get from skill name using skill_name2id  
++	        skill_id = skill_name2id(skill_input.c_str());  
++	        if (skill_id == 0) {  
++	            // Fallback to script constants  
++	            int64 constant_value = 0;  
++	            if (script_get_constant(skill_input.c_str(), &constant_value)) {  
++	                skill_id = static_cast<uint32>(constant_value);  
++	            }  
++	        }  
++	    }  
++	
++	    if (skill_id == 0) {  
++	        this->invalidWarning(node["SkillId"], "Unknown skill %s.\n", skill_input.c_str());  
++	        return 0;  
++	    }  
++	
++	    js->skill_id = skill_id;  
++	}
++
++    // Parse minimum level  
++    if (this->nodeExists(node, "MinLevel")) {  
++        uint32 min_level;  
++        if (!this->asUInt32(node, "MinLevel", min_level))  
++            return 0;  
++  
++        if (min_level < 1 || min_level > MAX_SKILL_LEVEL) {  
++            this->invalidWarning(node["MinLevel"], "Invalid minimum level %u.\n", min_level);  
++            return 0;  
++        }  
++  
++        js->min_level = min_level;  
++    }  
++  
++    // Parse script  
++    std::string script;  
++    if (this->nodeExists(node, "Script")) {  
++        if (!this->asString(node, "Script", script))  
++            return 0;  
++  
++        if (exists && js->script) {  
++            script_free_code(js->script);  
++            js->script = nullptr;  
++        }  
++  
++        js->script = parse_script(script.c_str(), this->getCurrentFile().c_str(),   
++                                this->getLineNumber(node["Script"]), SCRIPT_IGNORE_EXTERNAL_BRACKETS);  
++    } else {  
++        if (!exists)  
++            js->script = nullptr;  
++    }  
++  
++    if (!exists)  
++        this->put(id, js);  
++  
++    return 1;  
++}
++
+ #if defined(RENEWAL_DROP) || defined(RENEWAL_EXP)
+ /**
+  * Renewal EXP/Item Drop rate modifier based on level penalty
+@@ -14530,6 +14788,8 @@ void pc_readdb(void) {
+ 		
+ 	//reset
+ 	job_db.clear(); // job_info table
++	job_bonus_db.clear();
++	job_bonus_skill_db.clear();  
+ 
+ #if defined(RENEWAL_DROP) || defined(RENEWAL_EXP)
+ 	penalty_db.load();
+@@ -14537,6 +14797,9 @@ void pc_readdb(void) {
+ 
+ 	statpoint_db.clear();
+ 	job_db.load();
++	job_bonus_db.load();
++	job_bonus_skill_db.load();  
++	map_foreachpc(pc_status_refresh);
+ 
+ 	for(i=0; i<ARRAYLENGTH(dbsubpath); i++){
+ 		uint8 n1 = (uint8)(strlen(db_path)+strlen(dbsubpath[i])+1);
+@@ -16034,6 +16297,8 @@ uint64 CaptchaDatabase::parseBodyNode(const ryml::NodeRef &node) {
+ void do_final_pc(void) {
+ 	db_destroy(itemcd_db);
+ 	do_final_pc_groups();
++	job_bonus_db.clear();
++	job_bonus_skill_db.clear();
+ 
+ 	ers_destroy(pc_sc_display_ers);
+ 	ers_destroy(num_reg_ers);
+diff --git a/src/map/pc.hpp b/src/map/pc.hpp
+index 923d24a60f..a1c9ad63fa 100644
+--- a/src/map/pc.hpp
++++ b/src/map/pc.hpp
+@@ -96,6 +96,14 @@ enum equip_index {
+ 	EQI_MAX
+ };
+ 
++enum job_bonus_type {
++	JST_ALL = 0,
++	JST_JOB = 1,
++	JST_ACCOUNT = 2,
++	JST_CHAR = 3,
++	JST_GUILD = 4
++};
++
+ enum prevent_logout_trigger {
+ 	PLT_NONE = 0,
+ 	PLT_LOGIN = 1,
+@@ -1129,6 +1137,55 @@ class JobDatabase : public TypesafeCachedYamlDatabase<uint16, s_job_info> {
+ 
+ extern JobDatabase job_db;
+ 
++struct s_job_bonus_db {
++	struct script_code *script;
++	job_bonus_type type;
++	uint32 id, account_id, guild_id, char_id, jobidx;
++
++	~s_job_bonus_db() {
++		if (this->script){
++			script_free_code(this->script);
++			this->script = nullptr;
++		}
++	}
++};
++
++class JobBonusDatabase : public TypesafeYamlDatabase<uint32, s_job_bonus_db> {
++public:
++	JobBonusDatabase() : TypesafeYamlDatabase("JOB_BONUS", 1) {
++
++	}
++
++	const std::string getDefaultLocation() override;
++	uint64 parseBodyNode(const ryml::NodeRef &node) override;
++};
++
++extern JobBonusDatabase job_bonus_db;
++
++struct s_job_bonus_skill_db {  
++    struct script_code *script;  
++    uint32 id, skill_id, min_level;  
++  
++    ~s_job_bonus_skill_db() {  
++        if (this->script){  
++            script_free_code(this->script);  
++            this->script = nullptr;  
++        }  
++    }  
++};  
++  
++class JobBonusSkillDatabase : public TypesafeYamlDatabase<uint32, s_job_bonus_skill_db> {  
++public:  
++    JobBonusSkillDatabase() : TypesafeYamlDatabase("JOB_BONUS_SKILL", 1) {  
++  
++    }  
++  
++    const std::string getDefaultLocation() override;  
++    uint64 parseBodyNode(const ryml::NodeRef &node) override;  
++};  
++  
++extern JobBonusSkillDatabase job_bonus_skill_db;
++
+ #define EQP_WEAPON EQP_HAND_R
+ #define EQP_SHIELD EQP_HAND_L
+ #define EQP_ARMS (EQP_HAND_R|EQP_HAND_L)
+@@ -1742,6 +1799,8 @@ void pc_show_questinfo(map_session_data *sd);
+ void pc_show_questinfo_reinit(map_session_data *sd);
+ 
+ bool pc_job_can_entermap(enum e_job jobid, int32 m, int32 group_lv);
++void pc_job_bonus(map_session_data *sd);
++void pc_job_bonus_skill(map_session_data *sd);
+ 
+ #if defined(RENEWAL_DROP) || defined(RENEWAL_EXP)
+ uint16 pc_level_penalty_mod( map_session_data* sd, e_penalty_type type, std::shared_ptr<s_mob_db> mob, mob_data* md = nullptr );
+diff --git a/src/map/status.cpp b/src/map/status.cpp
+index a196082343..5a39894390 100644
+--- a/src/map/status.cpp
++++ b/src/map/status.cpp
+@@ -4189,6 +4189,8 @@ int32 status_calc_pc_sub(map_session_data* sd, uint8 opt)
+ 	}
+ 
+ 	pc_bonus_script(sd);
++	pc_job_bonus(sd);
++	pc_job_bonus_skill(sd);
+ 
+ 	if( sd->pd ) { // Pet Bonus
+ 		pet_data *pd = sd->pd;
